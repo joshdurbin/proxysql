@@ -2504,6 +2504,14 @@ void update_modules_metrics() {
 	if (GloMTH) {
 		GloMTH->p_update_metrics();
 	}
+	// Update mysql query processor latency metrics
+	if (GloMyQPro) {
+		GloMyQPro->p_update_latency_metrics();
+	}
+	// Update pgsql query processor latency metrics
+	if (GloPgQPro) {
+		GloPgQPro->p_update_pgsql_latency_metrics();
+	}
 	// Update pgsql_threads_handler metrics
 	if (GloPTH) {
 		GloPTH->p_update_metrics();

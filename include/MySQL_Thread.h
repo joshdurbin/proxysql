@@ -561,6 +561,12 @@ class MySQL_Threads_Handler
 		int data_packets_history_size;
 		int handle_warnings;
 		int evaluate_replication_lag_on_servers_load;
+		// T-Digest latency tracking configuration
+		bool command_latency_tracking_enabled;
+		char *command_latency_tracking_quantiles;
+		int command_latency_tracking_compression; // Stored as int * 100
+		int command_latency_tracking_max_centroids;
+		int command_latency_tracking_max_unmerged;
 	} variables;
 	struct {
 		unsigned int mirror_sessions_current;

@@ -4,6 +4,9 @@
 #include "cpp.h"
 #include "QP_rule_text.h"
 #include "query_processor.h"
+#include "tdigest.h"
+#include "prometheus_helpers.h"
+#include <map>
 
 class Command_Counter;
 typedef struct _MySQL_Query_processor_Rule_t : public QP_rule_t { 
@@ -58,8 +61,16 @@ public:
 		int mirror_hostgroup, const char* error_msg, const char* OK_msg, int sticky_conn, int multiplex, int gtid_from_hostgroup, int log,
 		bool apply, const char* attributes, const char* comment);
 
+	SQLite3_result* get_stats_latency_quantiles();
+	SQLite3_result* get_stats_tdigest_config();
+	void p_update_latency_metrics();
+	void update_tdigest_configuration();
+
 private:
 	Command_Counter* commands_counters[MYSQL_COM_QUERY___NONE];
+	CommandLatencyTracker* latency_tracker;
+	prometheus::Family<prometheus::Gauge>* p_latency_quantile_family;
+	std::map<std::string, prometheus::Gauge*> p_latency_quantile_map;
 	static bool _is_valid_gtid(char* gtid, size_t gtid_len);
 	static MySQL_Query_Processor_Rule_t* new_query_rule(const MySQL_Query_Processor_Rule_t* mqr);
 

@@ -3322,7 +3322,7 @@ void MySQL_Session::handler___status_WAITING_CLIENT_DATA___STATE_SLEEP___MYSQL_C
 			l_free(pkt.size,pkt.ptr);
 			client_myds->DSS=STATE_SLEEP;
 			status=WAITING_CLIENT_DATA;
-			CurrentQuery.end_time=thread->curtime;
+			CurrentQuery.end_time=monotonic_time();
 			CurrentQuery.end();
 		} else {
 			mybe=find_or_create_backend(current_hostgroup);
@@ -3391,7 +3391,7 @@ void MySQL_Session::handler___status_WAITING_CLIENT_DATA___STATE_SLEEP___MYSQL_C
 			return;
 		}
 		CurrentQuery.stmt_info=stmt_info;
-		CurrentQuery.start_time=thread->curtime;
+		CurrentQuery.start_time=monotonic_time();
 
 		timespec begint;
 		timespec endt;
@@ -3821,7 +3821,7 @@ int MySQL_Session::GPFC_WaitingClientData_FastForwardSession(PtrSize_t& pkt) {
 	mybe->server_myds->connect_retries_on_failure = mysql_thread___connect_retries_on_failure;
 	// 'CurrentQuery' isn't used for 'FAST_FORWARD' but we update it for using it as a session
 	// startup time for when a fast_forward session has attempted to obtain a connection.
-	CurrentQuery.start_time=thread->curtime;
+	CurrentQuery.start_time=monotonic_time();
 
 	//NEXT_IMMEDIATE(CONNECTING_SERVER);  // we create a connection . next status will be FAST_FORWARD
 	// we can't use NEXT_IMMEDIATE() inside get_pkts_from_client()
@@ -3932,7 +3932,7 @@ int MySQL_Session::GPFC_Replication_SwitchToFastForward(PtrSize_t& pkt, unsigned
 			mybe->server_myds->max_connect_time = thread->curtime + connect_timeout * 1000;
 		}
 		mybe->server_myds->connect_retries_on_failure = mysql_thread___connect_retries_on_failure;
-		CurrentQuery.start_time=thread->curtime;
+		CurrentQuery.start_time=monotonic_time();
 		// =============================================================================
 
 		// we don't have a connection
@@ -7527,7 +7527,7 @@ unsigned long long MySQL_Session::IdleTime() {
 void MySQL_Session::LogQuery(MySQL_Data_Stream *myds, const unsigned int myerrno, const char * errmsg) {
 	// we need to access statistics before calling CurrentQuery.end()
 	// so we track the time here
-	CurrentQuery.end_time=thread->curtime;
+	CurrentQuery.end_time=monotonic_time();
 
 	if (qpo) {
 		if (qpo->log==1) {

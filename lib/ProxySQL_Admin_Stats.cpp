@@ -1360,6 +1360,7 @@ void ProxySQL_Admin::stats___pgsql_commands_counters() {
 	delete resultset;
 }
 
+
 void ProxySQL_Admin::stats___mysql_query_rules() {
 	if (!GloMyQPro) return;
 	SQLite3_result * resultset=GloMyQPro->get_stats_query_rules();

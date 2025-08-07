@@ -509,6 +509,11 @@ static char * mysql_thread_variables_names[]= {
 	(char *)"evaluate_replication_lag_on_servers_load",
 	(char *)"proxy_protocol_networks",
 	(char *)"protocol_compression_level",
+	(char *)"command_latency_tracking_enabled",
+	(char *)"command_latency_tracking_quantiles",
+	(char *)"command_latency_tracking_compression",
+	(char *)"command_latency_tracking_max_centroids",
+	(char *)"command_latency_tracking_max_unmerged",
 	NULL
 };
 
@@ -980,6 +985,12 @@ MySQL_Threads_Handler::MySQL_Threads_Handler() {
 	variables.client_host_error_counts=0;
 	variables.handle_warnings=1;
 	variables.evaluate_replication_lag_on_servers_load=1;
+	// Initialize command latency tracking configuration variables
+	variables.command_latency_tracking_enabled=false;
+	variables.command_latency_tracking_quantiles=strdup((char *)"0.5,0.9,0.95,0.99");
+	variables.command_latency_tracking_compression=10000; // 100.0 * 100 (stored as int)
+	variables.command_latency_tracking_max_centroids=2048;
+	variables.command_latency_tracking_max_unmerged=100;
 	variables.connect_retries_on_failure=10;
 	variables.connection_delay_multiplex_ms=0;
 	variables.connection_max_age_ms=0;
@@ -1371,6 +1382,7 @@ char * MySQL_Threads_Handler::get_variable_string(char *name) {
 	if (!strcmp(name,"keep_multiplexing_variables")) return strdup(variables.keep_multiplexing_variables);
 	if (!strcmp(name,"default_authentication_plugin")) return strdup(variables.default_authentication_plugin);
 	if (!strcmp(name,"proxy_protocol_networks")) return strdup(variables.proxy_protocol_networks);
+	if (!strcmp(name,"command_latency_tracking_quantiles")) return strdup(variables.command_latency_tracking_quantiles);
 	// LCOV_EXCL_START
 	proxy_error("Not existing variable: %s\n", name); assert(0);
 	return NULL;
@@ -1922,6 +1934,15 @@ bool MySQL_Threads_Handler::set_variable(char *name, const char *value) {	// thi
 			return true;
 		}
 	}
+	if (!strcasecmp(name,"command_latency_tracking_quantiles")) {
+		if (vallen) {
+			free(variables.command_latency_tracking_quantiles);
+			variables.command_latency_tracking_quantiles=strdup(value);
+			return true;
+		} else {
+			return false;
+		}
+	}
 	// SSL proxy to server variables
 	if (!strcasecmp(name,"ssl_p2s_ca")) {
 		if (variables.ssl_p2s_ca) free(variables.ssl_p2s_ca);
@@ -2175,6 +2196,8 @@ char ** MySQL_Threads_Handler::get_variables_list() {
 #ifdef DEBUG
 		VariablesPointers_bool["session_debug"] = make_tuple(&variables.session_debug, false);
 #endif /* DEBUG */
+		// Command latency tracking configuration variable
+		VariablesPointers_bool["command_latency_tracking_enabled"] = make_tuple(&variables.command_latency_tracking_enabled, false);
 		// variables with special variable == true
 		// the input validation for these variables MUST be EXPLICIT
 		VariablesPointers_bool["have_compress"]      = make_tuple(&variables.have_compress,      true);
@@ -2279,6 +2302,10 @@ char ** MySQL_Threads_Handler::get_variables_list() {
 		VariablesPointers_int["handle_warnings"]			   = make_tuple(&variables.handle_warnings,				  0,			  1, false);
 		VariablesPointers_int["evaluate_replication_lag_on_servers_load"] = make_tuple(&variables.evaluate_replication_lag_on_servers_load, 0, 1, false);
 		VariablesPointers_int["protocol_compression_level"]    = make_tuple(&variables.protocol_compression_level,   -1,              9, false);
+		// Command latency tracking configuration variables
+		VariablesPointers_int["command_latency_tracking_compression"]     = make_tuple(&variables.command_latency_tracking_compression,    100,      100000, false);
+		VariablesPointers_int["command_latency_tracking_max_centroids"]   = make_tuple(&variables.command_latency_tracking_max_centroids,   1,       10000, false);
+		VariablesPointers_int["command_latency_tracking_max_unmerged"]    = make_tuple(&variables.command_latency_tracking_max_unmerged,    1,       10000, false);
 
 		// logs
 		VariablesPointers_int["auditlog_filesize"]     = make_tuple(&variables.auditlog_filesize,    1024*1024, 1*1024*1024*1024, false);

@@ -662,6 +662,8 @@ class ProxySQL_Admin {
 	void stats___pgsql_client_host_cache(bool reset);
 	void stats___pgsql_query_rules();
 	void stats___pgsql_commands_counters();
+	void stats___pgsql_query_latency_quantiles();
+	void stats___pgsql_tdigest_config();
 	int  stats___save_pgsql_query_digest_to_sqlite(
 		const bool reset, const bool copy, const SQLite3_result* resultset,
 		const umap_query_digest* digest_umap, const umap_query_digest_text* digest_text_umap

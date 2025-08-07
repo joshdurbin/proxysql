@@ -1194,6 +1194,12 @@ __thread int pgsql_thread___query_cache_handle_warnings;
 __thread bool pgsql_thread___session_idle_show_processlist;
 __thread char* pgsql_thread___default_variables[PGSQL_NAME_LAST_LOW_WM];
 __thread int pgsql_thread___handle_unknown_charset;
+// PostgreSQL Command latency tracking configuration
+__thread bool pgsql_thread___command_latency_tracking_enabled;
+__thread char *pgsql_thread___command_latency_tracking_quantiles;
+__thread int pgsql_thread___command_latency_tracking_compression;
+__thread int pgsql_thread___command_latency_tracking_max_centroids;
+__thread int pgsql_thread___command_latency_tracking_max_unmerged;
 //---------------------------
 
 __thread char *mysql_thread___default_schema;
@@ -1308,6 +1314,13 @@ __thread char * mysql_thread___ssl_p2s_key;
 __thread char * mysql_thread___ssl_p2s_cipher;
 __thread char * mysql_thread___ssl_p2s_crl;
 __thread char * mysql_thread___ssl_p2s_crlpath;
+
+/* variables used for MySQL command latency tracking */
+__thread bool mysql_thread___command_latency_tracking_enabled;
+__thread char *mysql_thread___command_latency_tracking_quantiles;
+__thread int mysql_thread___command_latency_tracking_compression;
+__thread int mysql_thread___command_latency_tracking_max_centroids;
+__thread int mysql_thread___command_latency_tracking_max_unmerged;
 
 /* variables used by events log */
 __thread char * mysql_thread___eventslog_filename;
@@ -1499,6 +1512,12 @@ extern __thread int pgsql_thread___query_cache_handle_warnings;
 extern __thread bool pgsql_thread___session_idle_show_processlist;
 extern __thread char* pgsql_thread___default_variables[PGSQL_NAME_LAST_LOW_WM];
 extern __thread int pgsql_thread___handle_unknown_charset;
+// PostgreSQL Command latency tracking configuration
+extern __thread bool pgsql_thread___command_latency_tracking_enabled;
+extern __thread char *pgsql_thread___command_latency_tracking_quantiles;
+extern __thread int pgsql_thread___command_latency_tracking_compression;
+extern __thread int pgsql_thread___command_latency_tracking_max_centroids;
+extern __thread int pgsql_thread___command_latency_tracking_max_unmerged;
 //---------------------------
 
 extern __thread char *mysql_thread___default_schema;
@@ -1668,6 +1687,13 @@ extern __thread char * mysql_thread___monitor_password;
 extern __thread char * mysql_thread___monitor_replication_lag_use_percona_heartbeat;
 
 extern __thread char * mysql_thread___add_ldap_user_comment;
+
+// Command latency tracking configuration
+extern __thread bool mysql_thread___command_latency_tracking_enabled;
+extern __thread char * mysql_thread___command_latency_tracking_quantiles;
+extern __thread int mysql_thread___command_latency_tracking_compression;
+extern __thread int mysql_thread___command_latency_tracking_max_centroids;
+extern __thread int mysql_thread___command_latency_tracking_max_unmerged;
 
 #ifdef DEBUG
 extern __thread bool mysql_thread___session_debug;

@@ -995,6 +995,12 @@ public:
 		bool log_mysql_warnings_enabled;
 		int data_packets_history_size;
 		int handle_warnings;
+		// PostgreSQL Command latency tracking configuration
+		bool command_latency_tracking_enabled;
+		char *command_latency_tracking_quantiles;
+		int command_latency_tracking_compression; // Stored as int * 100
+		int command_latency_tracking_max_centroids;
+		int command_latency_tracking_max_unmerged;
 		char* server_version;
 		char* server_encoding;
 	} variables;

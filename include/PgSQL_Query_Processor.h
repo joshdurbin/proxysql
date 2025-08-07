@@ -4,6 +4,7 @@
 #include "cpp.h"
 #include "QP_rule_text.h"
 #include "query_processor.h"
+#include "tdigest.h"
 
 class Command_Counter;
 struct PgSQL_Query_Processor_Rule_t : public QP_rule_t {};
@@ -24,6 +25,8 @@ public:
 	void end_thread();
 	void update_query_processor_stats();
 	SQLite3_result* get_stats_commands_counters();
+	SQLite3_result* get_stats_latency_quantiles();
+	SQLite3_result* get_stats_tdigest_config();
 	SQLite3_result* get_current_query_rules();
 	PgSQL_Query_Processor_Output* process_query(PgSQL_Session* sess, void* ptr, unsigned int size, PgSQL_Query_Info* qi);
 	unsigned long long query_parser_update_counters(PgSQL_Session* sess, enum PGSQL_QUERY_command c, SQP_par_t* qp, unsigned long long t);
@@ -35,8 +38,17 @@ public:
 		int mirror_hostgroup, const char* error_msg, const char* OK_msg, int sticky_conn, int multiplex, int log,
 		bool apply, const char* attributes, const char* comment);
 
+	void p_update_pgsql_latency_metrics();
+	void update_pgsql_tdigest_configuration();
+
 private:
 	Command_Counter* commands_counters[PGSQL_QUERY___NONE];
+	CommandLatencyTracker* pgsql_latency_tracker;
+	
+	// Prometheus metrics support
+	prometheus::Family<prometheus::Gauge>* p_pgsql_latency_quantile_family;
+	std::map<std::string, prometheus::Gauge*> p_pgsql_latency_quantile_map;
+	
 	static PgSQL_Query_Processor_Rule_t* new_query_rule(const PgSQL_Query_Processor_Rule_t* mqr);
 
 	friend class Query_Processor;

@@ -5,10 +5,12 @@ using json = nlohmann::json;
 #include <iostream>     // std::cout
 #include <algorithm>    // std::sort
 #include <vector>       // std::vector
+#include <sstream>      // std::stringstream
 #include "proxysql.h"
 #include "cpp.h"
 #include "Command_Counter.h"
 #include "PgSQL_Query_Processor.h"
+#include "tdigest.h"
 
 extern PgSQL_Threads_Handler* GloPTH;
 extern ProxySQL_Admin *GloAdmin;
@@ -234,10 +236,22 @@ PgSQL_Query_Processor::PgSQL_Query_Processor() :
 	Query_Processor<PgSQL_Query_Processor>(GloPTH->get_variable_int("query_rules_fast_routing_algorithm")) {
 
 	for (int i = 0; i < PGSQL_QUERY___NONE; i++) commands_counters[i] = new Command_Counter(i,15,commands_counters_desc);
+	
+	// Initialize PostgreSQL t-digest latency tracker
+	pgsql_latency_tracker = new CommandLatencyTracker(PGSQL_QUERY___NONE);
+	
+	// Initialize Prometheus metrics (will be initialized on first use if null)
+	p_pgsql_latency_quantile_family = nullptr;
 }
 
 PgSQL_Query_Processor::~PgSQL_Query_Processor() {
 	for (int i = 0; i < PGSQL_QUERY___NONE; i++) delete commands_counters[i];
+	
+	// Clean up PostgreSQL t-digest tracker
+	if (pgsql_latency_tracker) {
+		delete pgsql_latency_tracker;
+		pgsql_latency_tracker = nullptr;
+	}
 }
 
 void PgSQL_Query_Processor::update_query_processor_stats() {
@@ -258,6 +272,10 @@ void PgSQL_Query_Processor::end_thread() {
 unsigned long long PgSQL_Query_Processor::query_parser_update_counters(PgSQL_Session* sess, enum PGSQL_QUERY_command c, SQP_par_t* qp, unsigned long long t) {
 	if (c >= PGSQL_QUERY___NONE) return 0;
 	unsigned long long ret = _thr_commands_counters[c]->add_time(t);
+	
+	// Record latency in PostgreSQL t-digest for quantile computation
+	pgsql_latency_tracker->record_latency(static_cast<size_t>(c), t);
+	
 	Query_Processor::query_parser_update_counters(sess, qp->digest_total, qp->digest, qp->digest_text, t);
 	return ret;
 }
@@ -649,6 +667,137 @@ SQLite3_result* PgSQL_Query_Processor::get_stats_commands_counters() {
 		result->add_row(pta);
 		commands_counters[i]->free_row(pta);
 	}
+	return result;
+}
+
+SQLite3_result* PgSQL_Query_Processor::get_stats_latency_quantiles() {
+	proxy_debug(PROXY_DEBUG_MYSQL_QUERY_PROCESSOR, 4, "Dumping PostgreSQL latency quantiles\n");
+	
+	// Get configured quantiles dynamically
+	std::vector<double> quantiles = pgsql_latency_tracker->get_configured_quantiles();
+	
+	// Create result with dynamic column count (2 fixed columns + quantile columns)
+	int total_columns = 2 + quantiles.size();
+	SQLite3_result* result = new SQLite3_result(total_columns);
+	
+	// Add fixed columns
+	result->add_column_definition(SQLITE_TEXT, "Command");
+	result->add_column_definition(SQLITE_TEXT, "Query_Count");
+	
+	// Add dynamic quantile columns
+	for (size_t i = 0; i < quantiles.size(); i++) {
+		std::ostringstream col_name;
+		col_name << "p" << std::fixed << std::setprecision(0) << (quantiles[i] * 100) << "_us";
+		result->add_column_definition(SQLITE_TEXT, col_name.str().c_str());
+	}
+	
+	for (int i = 0; i < PGSQL_QUERY___NONE; i++) {
+		if (pgsql_latency_tracker->get_query_count(i) > 0) {
+			char** pta = (char**)malloc(sizeof(char*) * total_columns);
+			
+			// Command name
+			pta[0] = commands_counters_desc[i];
+			
+			// Query count
+			char* query_count = (char*)malloc(32);
+			sprintf(query_count, "%llu", (unsigned long long)pgsql_latency_tracker->get_query_count(i));
+			pta[1] = query_count;
+			
+			// Get quantile values
+			std::vector<double> q_values = pgsql_latency_tracker->get_quantiles(i, quantiles);
+			
+			// Fill dynamic quantile columns
+			for (size_t j = 0; j < quantiles.size(); j++) {
+				char* quantile_val = (char*)malloc(32);
+				if (j < q_values.size() && !std::isnan(q_values[j])) {
+					sprintf(quantile_val, "%.0f", q_values[j]);
+				} else {
+					sprintf(quantile_val, "0");
+				}
+				pta[2 + j] = quantile_val;
+			}
+			
+			result->add_row(pta);
+			
+			// Free allocated memory (except command name which is static)
+			for (int j = 1; j < total_columns; j++) {
+				free(pta[j]);
+			}
+			free(pta);
+		}
+	}
+	
+	return result;
+}
+
+SQLite3_result* PgSQL_Query_Processor::get_stats_tdigest_config() {
+	SQLite3_result* result = new SQLite3_result(3);
+	result->add_column_definition(SQLITE_TEXT, "Variable_name");
+	result->add_column_definition(SQLITE_TEXT, "Value");
+	result->add_column_definition(SQLITE_TEXT, "Description");
+	
+	// Helper lambda for safe row addition
+	auto add_config_row = [&result](const char* var_name, const char* value, const char* description) {
+		char** pta = new char*[3];
+		pta[0] = strdup(var_name);
+		pta[1] = strdup(value);
+		pta[2] = strdup(description);
+		result->add_row(pta);
+		// SQLite3_result takes ownership, so we free the array but not the strings
+		delete[] pta;
+	};
+	
+	// T-Digest enabled status
+	add_config_row("pgsql_command_latency_tracking_enabled",
+				  pgsql_thread___command_latency_tracking_enabled ? "true" : "false",
+				  "Enable/disable t-digest latency tracking for PostgreSQL");
+	
+	// Configured quantiles
+	add_config_row("pgsql_command_latency_tracking_quantiles",
+				  pgsql_thread___command_latency_tracking_quantiles,
+				  "Comma-separated list of quantiles to track (e.g., 0.5,0.95,0.99)");
+	
+	// Compression factor
+	char compression_str[64];
+	double compression = pgsql_thread___command_latency_tracking_compression / 100.0;
+	snprintf(compression_str, sizeof(compression_str), "%.2f", compression);
+	add_config_row("pgsql_command_latency_tracking_compression",
+				  compression_str,
+				  "T-digest compression factor (higher = more accurate, more memory)");
+	
+	// Max centroids
+	char centroids_str[32];
+	snprintf(centroids_str, sizeof(centroids_str), "%d", pgsql_thread___command_latency_tracking_max_centroids);
+	add_config_row("pgsql_command_latency_tracking_max_centroids",
+				  centroids_str,
+				  "Maximum number of centroids per t-digest");
+	
+	// Max unmerged
+	char unmerged_str[32];
+	snprintf(unmerged_str, sizeof(unmerged_str), "%d", pgsql_thread___command_latency_tracking_max_unmerged);
+	add_config_row("pgsql_command_latency_tracking_max_unmerged",
+				  unmerged_str,
+				  "Maximum unmerged buffer size before compression");
+	
+	// Current status if tracker exists
+	if (pgsql_latency_tracker) {
+		add_config_row("current_status",
+					  pgsql_latency_tracker->is_enabled() ? "enabled" : "disabled",
+					  "Current operational status of t-digest tracking");
+		
+		// Current configured quantiles  
+		std::vector<double> quantiles = pgsql_latency_tracker->get_configured_quantiles();
+		std::ostringstream quantiles_oss;
+		for (size_t i = 0; i < quantiles.size(); ++i) {
+			if (i > 0) quantiles_oss << ",";
+			quantiles_oss << quantiles[i];
+		}
+		
+		add_config_row("active_quantiles",
+					  quantiles_oss.str().c_str(),
+					  "Currently active quantiles parsed from configuration");
+	}
+	
 	return result;
 }
 
@@ -1151,4 +1300,102 @@ __exit__query_parser_command_type:
 		qp->query_prefix = NULL;
 	}
 	return ret;
+}
+
+// PostgreSQL T-Digest Latency Statistics Implementation
+
+
+void PgSQL_Query_Processor::update_pgsql_tdigest_configuration() {
+	if (!pgsql_latency_tracker || !GloPTH) {
+		return;
+	}
+	
+	// Get configuration values from PostgreSQL thread-local variables
+	bool enabled = pgsql_thread___command_latency_tracking_enabled;
+	const char* quantiles_str = pgsql_thread___command_latency_tracking_quantiles;
+	int compression = pgsql_thread___command_latency_tracking_compression;
+	int max_centroids = pgsql_thread___command_latency_tracking_max_centroids;
+	int max_unmerged = pgsql_thread___command_latency_tracking_max_unmerged;
+	
+	// Update t-digest configuration
+	pgsql_latency_tracker->update_configuration(enabled, quantiles_str, 
+		compression, max_centroids, max_unmerged);
+}
+
+void PgSQL_Query_Processor::p_update_pgsql_latency_metrics() {
+	// Ensure we have the latest configuration
+	update_pgsql_tdigest_configuration();
+	
+	if (!pgsql_latency_tracker || !pgsql_latency_tracker->is_enabled()) {
+		return;
+	}
+	
+	// Initialize Prometheus family if needed and registry is available
+	if (p_pgsql_latency_quantile_family == nullptr) {
+		if (GloVars.prometheus_registry != nullptr) {
+			try {
+				p_pgsql_latency_quantile_family = &prometheus::BuildGauge()
+					.Name("proxysql_pgsql_query_latency_quantile_seconds")
+					.Help("PostgreSQL query latency quantiles by command type")
+					.Register(*GloVars.prometheus_registry);
+			} catch (const std::exception& e) {
+				// Failed to initialize prometheus family, skip metrics update
+				return;
+			}
+		} else {
+			// Prometheus registry not available yet
+			return;
+		}
+	}
+	
+	std::vector<double> quantiles = pgsql_latency_tracker->get_configured_quantiles();
+	if (quantiles.empty()) {
+		quantiles = {0.5, 0.9, 0.95, 0.99}; // Fallback defaults
+	}
+	
+	for (int i = 0; i < PGSQL_QUERY___NONE; i++) {
+		uint64_t query_count = pgsql_latency_tracker->get_query_count(i);
+		if (query_count > 0) {
+			std::vector<double> q_values = pgsql_latency_tracker->get_quantiles(i, quantiles);
+			const char* command_name = commands_counters_desc[i];
+			
+			// Safety check for command name
+			if (!command_name) {
+				continue;
+			}
+			
+			for (size_t j = 0; j < quantiles.size() && j < q_values.size(); j++) {
+				if (!std::isnan(q_values[j]) && std::isfinite(q_values[j])) {
+					try {
+						std::string command = std::string(command_name);
+						std::string quantile = std::to_string(quantiles[j]);
+						
+						std::string metric_key = command + "_" + quantile;
+						
+						// Find or create gauge
+						auto it = p_pgsql_latency_quantile_map.find(metric_key);
+						prometheus::Gauge* gauge;
+						if (it == p_pgsql_latency_quantile_map.end()) {
+							gauge = &p_pgsql_latency_quantile_family->Add({
+								{"command", command},
+								{"quantile", quantile}
+							});
+							p_pgsql_latency_quantile_map[metric_key] = gauge;
+						} else {
+							gauge = it->second;
+						}
+						
+						// Update gauge value (convert microseconds to seconds)
+						double latency_seconds = q_values[j] / 1000000.0;
+						if (std::isfinite(latency_seconds) && latency_seconds >= 0.0) {
+							gauge->Set(latency_seconds);
+						}
+					} catch (const std::exception& e) {
+						// Skip this metric if there's an error
+						continue;
+					}
+				}
+			}
+		}
+	}
 }

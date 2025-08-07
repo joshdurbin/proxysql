@@ -2295,7 +2295,7 @@ __get_pkts_from_client:
 					mybe->server_myds->connect_retries_on_failure = pgsql_thread___connect_retries_on_failure;
 					// 'CurrentQuery' isn't used for 'FAST_FORWARD' but we update it for using it as a session
 					// startup time for when a fast_forward session has attempted to obtain a connection.
-					CurrentQuery.start_time = thread->curtime;
+					CurrentQuery.start_time = monotonic_time();
 
 					{
 						//NEXT_IMMEDIATE(CONNECTING_SERVER);  // we create a connection . next status will be FAST_FORWARD
@@ -5464,7 +5464,7 @@ unsigned long long PgSQL_Session::IdleTime() {
 void PgSQL_Session::LogQuery(PgSQL_Data_Stream* myds) {
 	// we need to access statistics before calling CurrentQuery.end()
 	// so we track the time here
-	CurrentQuery.end_time = thread->curtime;
+	CurrentQuery.end_time = monotonic_time();
 
 	if (qpo) {
 		if (qpo->log == 1) {

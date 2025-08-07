@@ -451,6 +451,11 @@ static char* pgsql_thread_variables_names[] = {
 	(char*)"query_cache_stores_empty_result",
 	(char*)"data_packets_history_size",
 	(char*)"handle_warnings",
+	(char*)"command_latency_tracking_enabled",
+	(char*)"command_latency_tracking_quantiles",
+	(char*)"command_latency_tracking_compression",
+	(char*)"command_latency_tracking_max_centroids",
+	(char*)"command_latency_tracking_max_unmerged",
 	NULL
 };
 
@@ -925,6 +930,12 @@ PgSQL_Threads_Handler::PgSQL_Threads_Handler() {
 	variables.client_host_cache_size = 0;
 	variables.client_host_error_counts = 0;
 	variables.handle_warnings = 1;
+	// Initialize PostgreSQL command latency tracking configuration variables
+	variables.command_latency_tracking_enabled = false;
+	variables.command_latency_tracking_quantiles = strdup((char *)"0.5,0.9,0.95,0.99");
+	variables.command_latency_tracking_compression = 10000; // 100.0 * 100 (stored as int)
+	variables.command_latency_tracking_max_centroids = 2048;
+	variables.command_latency_tracking_max_unmerged = 100;
 	variables.connect_retries_on_failure = 10;
 	variables.connection_delay_multiplex_ms = 0;
 	variables.connection_max_age_ms = 0;
@@ -1302,6 +1313,7 @@ char* PgSQL_Threads_Handler::get_variable_string(char* name) {
 	}
 	if (!strcmp(name, "server_version")) return strdup(variables.server_version);
 	if (!strcmp(name, "server_encoding")) return strdup(variables.server_encoding);
+	if (!strcmp(name, "command_latency_tracking_quantiles")) return strdup(variables.command_latency_tracking_quantiles);
 	if (!strcmp(name, "eventslog_filename")) return strdup(variables.eventslog_filename);
 	if (!strcmp(name, "auditlog_filename")) return strdup(variables.auditlog_filename);
 	if (!strcmp(name, "interfaces")) return strdup(variables.interfaces);
@@ -1433,6 +1445,7 @@ char* PgSQL_Threads_Handler::get_variable(char* name) {	// this is the public fu
 	if (!strcasecmp(name, "firewall_whitelist_errormsg")) return strdup(variables.firewall_whitelist_errormsg);
 	if (!strcasecmp(name, "server_version")) return strdup(variables.server_version);
 	if (!strcasecmp(name, "server_encoding")) return strdup(variables.server_encoding);
+	if (!strcasecmp(name, "command_latency_tracking_quantiles")) return strdup(variables.command_latency_tracking_quantiles);
 	if (!strcasecmp(name, "auditlog_filename")) return strdup(variables.auditlog_filename);
 	if (!strcasecmp(name, "eventslog_filename")) return strdup(variables.eventslog_filename);
 	if (!strcasecmp(name, "default_schema")) return strdup(variables.default_schema);
@@ -1719,6 +1732,16 @@ bool PgSQL_Threads_Handler::set_variable(char* name, const char* value) {	// thi
 		if (vallen) {
 			free(variables.server_version);
 			variables.server_version = strdup(value);
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+	if (!strcasecmp(name, "command_latency_tracking_quantiles")) {
+		if (vallen) {
+			free(variables.command_latency_tracking_quantiles);
+			variables.command_latency_tracking_quantiles = strdup(value);
 			return true;
 		}
 		else {
@@ -2088,6 +2111,8 @@ char** PgSQL_Threads_Handler::get_variables_list() {
 		VariablesPointers_bool["stats_time_query_processor"] = make_tuple(&variables.stats_time_query_processor, false);
 		VariablesPointers_bool["use_tcp_keepalive"] = make_tuple(&variables.use_tcp_keepalive, false);
 		VariablesPointers_bool["verbose_query_error"] = make_tuple(&variables.verbose_query_error, false);
+		// PostgreSQL Command latency tracking configuration
+		VariablesPointers_bool["command_latency_tracking_enabled"] = make_tuple(&variables.command_latency_tracking_enabled, false);
 #ifdef IDLE_THREADS
 		VariablesPointers_bool["session_idle_show_processlist"] = make_tuple(&variables.session_idle_show_processlist, false);
 #endif // IDLE_THREADS
@@ -2204,6 +2229,10 @@ char** PgSQL_Threads_Handler::get_variables_list() {
 		VariablesPointers_int["client_host_cache_size"] = make_tuple(&variables.client_host_cache_size, 0, 1024 * 1024, false);
 		VariablesPointers_int["client_host_error_counts"] = make_tuple(&variables.client_host_error_counts, 0, 1024 * 1024, false);
 		VariablesPointers_int["handle_warnings"] = make_tuple(&variables.handle_warnings, 0, 1, false);
+		// PostgreSQL Command latency tracking configuration variables
+		VariablesPointers_int["command_latency_tracking_compression"]     = make_tuple(&variables.command_latency_tracking_compression,    100,      100000, false);
+		VariablesPointers_int["command_latency_tracking_max_centroids"]   = make_tuple(&variables.command_latency_tracking_max_centroids,   1,       10000, false);
+		VariablesPointers_int["command_latency_tracking_max_unmerged"]    = make_tuple(&variables.command_latency_tracking_max_unmerged,    1,        1000, false);
 
 		// logs
 		VariablesPointers_int["auditlog_filesize"] = make_tuple(&variables.auditlog_filesize, 1024 * 1024, 1 * 1024 * 1024 * 1024, false);

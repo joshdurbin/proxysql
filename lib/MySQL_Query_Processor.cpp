@@ -5,6 +5,9 @@ using json = nlohmann::json;
 #include <iostream>     // std::cout
 #include <algorithm>    // std::sort
 #include <vector>       // std::vector
+#include <string>       // std::string
+#include <sstream>      // std::ostringstream  
+#include <iomanip>      // std::setprecision
 #include "proxysql.h"
 #include "cpp.h"
 
@@ -142,6 +145,16 @@ MySQL_Query_Processor::MySQL_Query_Processor() :
 	Query_Processor<MySQL_Query_Processor>(GloMTH->get_variable_int("query_rules_fast_routing_algorithm")) {
 	
 	for (int i = 0; i < MYSQL_COM_QUERY___NONE; i++) commands_counters[i] = new Command_Counter(i,15,commands_counters_desc);
+	
+	latency_tracker = new CommandLatencyTracker(MYSQL_COM_QUERY___NONE);
+	
+	// DISABLED: Don't call update_tdigest_configuration() in constructor
+	// Thread-local variables may not be initialized yet!
+	// Configuration will be updated on first metrics call
+	// update_tdigest_configuration();
+	
+	// Initialize Prometheus latency quantile family (will be initialized on first use if null)
+	p_latency_quantile_family = nullptr;
 
 	//if (GloMTH) {
 	//	query_rules_fast_routing_algorithm = GloMTH->get_variable_int("query_rules_fast_routing_algorithm");
@@ -150,6 +163,10 @@ MySQL_Query_Processor::MySQL_Query_Processor() :
 
 MySQL_Query_Processor::~MySQL_Query_Processor() {
 	for (int i = 0; i < MYSQL_COM_QUERY___NONE; i++) delete commands_counters[i];
+	if (latency_tracker) {
+		delete latency_tracker;
+		latency_tracker = nullptr;
+	}
 }
 
 enum MYSQL_COM_QUERY_command MySQL_Query_Processor::query_parser_command_type(SQP_par_t* qp) {
@@ -596,6 +613,10 @@ void MySQL_Query_Processor::end_thread() {
 unsigned long long MySQL_Query_Processor::query_parser_update_counters(MySQL_Session* sess, enum MYSQL_COM_QUERY_command c, SQP_par_t* qp, unsigned long long t) {
 	if (c >= MYSQL_COM_QUERY___NONE) return 0;
 	unsigned long long ret = _thr_commands_counters[c]->add_time(t);
+	
+	// Record latency in t-digest for quantile computation
+	latency_tracker->record_latency(static_cast<size_t>(c), t);
+	
 	uint64_t digest = 0;
 	char* digest_text = NULL;
 	if (sess->CurrentQuery.stmt_info == NULL && qp->digest_text) {
@@ -635,6 +656,149 @@ SQLite3_result* MySQL_Query_Processor::get_stats_commands_counters() {
 		commands_counters[i]->free_row(pta);
 	}
 	return result;
+}
+
+SQLite3_result* MySQL_Query_Processor::get_stats_latency_quantiles() {
+	proxy_debug(PROXY_DEBUG_MYSQL_QUERY_PROCESSOR, 4, "Dumping latency quantiles\n");
+	
+	// Get configured quantiles dynamically
+	std::vector<double> quantiles = latency_tracker->get_configured_quantiles();
+	
+	// Create result with dynamic column count (2 fixed columns + quantile columns)
+	int total_columns = 2 + quantiles.size();
+	SQLite3_result* result = new SQLite3_result(total_columns);
+	
+	// Add fixed columns
+	result->add_column_definition(SQLITE_TEXT, "Command");
+	result->add_column_definition(SQLITE_TEXT, "Query_Count");
+	
+	// Add dynamic quantile columns
+	for (size_t i = 0; i < quantiles.size(); i++) {
+		std::ostringstream col_name;
+		col_name << "p" << std::fixed << std::setprecision(0) << (quantiles[i] * 100) << "_us";
+		result->add_column_definition(SQLITE_TEXT, col_name.str().c_str());
+	}
+	
+	for (int i = 0; i < MYSQL_COM_QUERY___NONE; i++) {
+		if (latency_tracker->get_query_count(i) > 0) {
+			char** pta = (char**)malloc(sizeof(char*) * total_columns);
+			
+			// Command name
+			pta[0] = commands_counters_desc[i];
+			
+			// Query count
+			char* query_count = (char*)malloc(32);
+			sprintf(query_count, "%llu", (unsigned long long)latency_tracker->get_query_count(i));
+			pta[1] = query_count;
+			
+			// Get quantile values
+			std::vector<double> q_values = latency_tracker->get_quantiles(i, quantiles);
+			
+			// Fill dynamic quantile columns
+			for (size_t j = 0; j < quantiles.size(); j++) {
+				char* quantile_val = (char*)malloc(32);
+				if (j < q_values.size() && !std::isnan(q_values[j])) {
+					sprintf(quantile_val, "%.0f", q_values[j]);
+				} else {
+					sprintf(quantile_val, "0");
+				}
+				pta[2 + j] = quantile_val;
+			}
+			
+			result->add_row(pta);
+			
+			// Free allocated memory (except command name which is static)
+			for (int j = 1; j < total_columns; j++) {
+				free(pta[j]);
+			}
+			free(pta);
+		}
+	}
+	
+	return result;
+}
+
+void MySQL_Query_Processor::p_update_latency_metrics() {
+	// Ensure we have the latest configuration
+	update_tdigest_configuration();
+	
+	// Update prometheus latency quantile metrics for all command types
+	if (!latency_tracker || !latency_tracker->is_enabled()) {
+		return; // Skip if t-digest is disabled
+	}
+	
+	// Initialize Prometheus family if needed and registry is available
+	if (p_latency_quantile_family == nullptr) {
+		if (GloVars.prometheus_registry != nullptr) {
+			try {
+				p_latency_quantile_family = &prometheus::BuildGauge()
+					.Name("proxysql_query_latency_quantile_seconds")
+					.Help("Query latency quantiles by command type")
+					.Register(*GloVars.prometheus_registry);
+			} catch (const std::exception& e) {
+				// Failed to initialize prometheus family, skip metrics update
+				proxy_error("MySQL t-digest: Failed to register Prometheus family: %s\n", e.what());
+				return;
+			}
+		} else {
+			// Prometheus registry not available yet
+			return;
+		}
+	}
+	
+	std::vector<double> quantiles = latency_tracker->get_configured_quantiles();
+	if (quantiles.empty()) {
+		quantiles = {0.5, 0.9, 0.95, 0.99}; // Fallback defaults
+	}
+	
+	for (int i = 0; i < MYSQL_COM_QUERY___NONE; i++) {
+		uint64_t query_count = latency_tracker->get_query_count(i);
+		if (query_count > 0) {
+			std::vector<double> q_values = latency_tracker->get_quantiles(i, quantiles);
+			const char* command_name = commands_counters_desc[i];
+			
+			// Safety check for command name
+			if (!command_name) {
+				continue;
+			}
+			
+			for (size_t j = 0; j < quantiles.size() && j < q_values.size(); j++) {
+				
+				// Accept any finite value, including zero and negative (which we'll clamp)
+				if (std::isfinite(q_values[j])) {
+					try {
+						// Create quantile label string
+						std::ostringstream quantile_label_stream;
+						quantile_label_stream << std::fixed << std::setprecision(3) << quantiles[j];
+						std::string quantile_label = quantile_label_stream.str();
+						
+						std::string metric_id = std::string(command_name) + "_" + quantile_label;
+						
+						std::map<std::string, std::string> labels = {
+							{"command", command_name},
+							{"quantile", quantile_label}
+						};
+						
+						// Find or create the gauge
+						auto it = p_latency_quantile_map.find(metric_id);
+						if (it == p_latency_quantile_map.end()) {
+							prometheus::Gauge* gauge = &(p_latency_quantile_family->Add(labels));
+							p_latency_quantile_map[metric_id] = gauge;
+							it = p_latency_quantile_map.find(metric_id);
+						}
+						
+						// Convert microseconds to seconds for Prometheus, ensuring non-negative
+						double latency_seconds = std::max(0.0, q_values[j] / 1000000.0);
+						it->second->Set(latency_seconds);
+					} catch (const std::exception& e) {
+						// Skip this metric if there's an error
+						proxy_error("MySQL t-digest: Exception when setting gauge: %s\n", e.what());
+						continue;
+					}
+				}
+			}
+		}
+	}
 }
 
 MySQL_Query_Processor_Output* MySQL_Query_Processor::process_query(MySQL_Session* sess, void* ptr, unsigned int size, Query_Info* qi) {
@@ -1003,5 +1167,91 @@ SQLite3_result* MySQL_Query_Processor::get_current_query_rules() {
 		delete qt;
 	}
 	wrunlock();
+	return result;
+}
+
+void MySQL_Query_Processor::update_tdigest_configuration() {
+	if (latency_tracker && GloMTH) {
+		// Get configuration from MySQL global variables (thread-safe)
+		bool enabled = GloMTH->get_variable_int("command_latency_tracking_enabled") != 0;
+		const char* quantiles_str = GloMTH->get_variable_string("command_latency_tracking_quantiles");
+		int compression = GloMTH->get_variable_int("command_latency_tracking_compression");
+		int max_centroids = GloMTH->get_variable_int("command_latency_tracking_max_centroids");
+		int max_unmerged = GloMTH->get_variable_int("command_latency_tracking_max_unmerged");
+		
+		// Update tracker configuration
+		latency_tracker->update_configuration(enabled, quantiles_str, 
+											compression, max_centroids, max_unmerged);
+	}
+}
+
+SQLite3_result* MySQL_Query_Processor::get_stats_tdigest_config() {
+	SQLite3_result* result = new SQLite3_result(3);
+	result->add_column_definition(SQLITE_TEXT, "Variable_name");
+	result->add_column_definition(SQLITE_TEXT, "Value");
+	result->add_column_definition(SQLITE_TEXT, "Description");
+	
+	// Helper lambda for safe row addition
+	auto add_config_row = [&result](const char* var_name, const char* value, const char* description) {
+		char** pta = new char*[3];
+		pta[0] = strdup(var_name);
+		pta[1] = strdup(value);
+		pta[2] = strdup(description);
+		result->add_row(pta);
+		// SQLite3_result takes ownership, so we free the array but not the strings
+		delete[] pta;
+	};
+	
+	// T-Digest enabled status
+	add_config_row("command_latency_tracking_enabled",
+				  mysql_thread___command_latency_tracking_enabled ? "true" : "false",
+				  "Enable/disable t-digest latency tracking");
+	
+	// Configured quantiles
+	add_config_row("command_latency_tracking_quantiles",
+				  mysql_thread___command_latency_tracking_quantiles,
+				  "Comma-separated list of quantiles to track (e.g., 0.5,0.95,0.99)");
+	
+	// Compression factor
+	char compression_str[64];
+	double compression = mysql_thread___command_latency_tracking_compression / 100.0;
+	snprintf(compression_str, sizeof(compression_str), "%.2f", compression);
+	add_config_row("command_latency_tracking_compression",
+				  compression_str,
+				  "T-digest compression factor (higher = more accurate, more memory)");
+	
+	// Max centroids
+	char centroids_str[32];
+	snprintf(centroids_str, sizeof(centroids_str), "%d", mysql_thread___command_latency_tracking_max_centroids);
+	add_config_row("command_latency_tracking_max_centroids",
+				  centroids_str,
+				  "Maximum number of centroids per t-digest");
+	
+	// Max unmerged
+	char unmerged_str[32];
+	snprintf(unmerged_str, sizeof(unmerged_str), "%d", mysql_thread___command_latency_tracking_max_unmerged);
+	add_config_row("command_latency_tracking_max_unmerged",
+				  unmerged_str,
+				  "Maximum unmerged buffer size before compression");
+	
+	// Current status if tracker exists
+	if (latency_tracker) {
+		add_config_row("current_status",
+					  latency_tracker->is_enabled() ? "enabled" : "disabled",
+					  "Current operational status of t-digest tracking");
+		
+		// Current configured quantiles  
+		std::vector<double> quantiles = latency_tracker->get_configured_quantiles();
+		std::ostringstream quantiles_oss;
+		for (size_t i = 0; i < quantiles.size(); ++i) {
+			if (i > 0) quantiles_oss << ",";
+			quantiles_oss << quantiles[i];
+		}
+		
+		add_config_row("active_quantiles",
+					  quantiles_oss.str().c_str(),
+					  "Currently active quantiles parsed from configuration");
+	}
+	
 	return result;
 }
